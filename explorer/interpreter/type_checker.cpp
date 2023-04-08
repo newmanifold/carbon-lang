@@ -470,6 +470,18 @@ static auto FindField(llvm::ArrayRef<NamedValue> fields,
   return *it;
 }
 
+static auto ExpectFieldNotExist(SourceLocation source_loc,
+                                std::string_view context,
+                                llvm::ArrayRef<NamedValue> fields,
+                                const std::string& field_name)
+    -> ErrorOr<Success> {
+  if (FindField(fields, field_name).has_value()) {
+    return ProgramError(source_loc)
+           << "Duplicate " << context << " name `" << field_name << "`";
+  }
+  return Success();
+}
+
 auto TypeChecker::FieldTypesImplicitlyConvertible(
     llvm::ArrayRef<NamedValue> source_fields,
     llvm::ArrayRef<NamedValue> destination_fields,
@@ -2774,6 +2786,9 @@ auto TypeChecker::TypeCheckExp(Nonnull<Expression*> e,
     case ExpressionKind::StructLiteral: {
       std::vector<NamedValue> arg_types;
       for (auto& arg : cast<StructLiteral>(*e).fields()) {
+        CARBON_RETURN_IF_ERROR(
+            ExpectFieldNotExist(arg.expression().source_loc(), "struct member",
+                                arg_types, arg.name()));
         CARBON_RETURN_IF_ERROR(TypeCheckExp(&arg.expression(), impl_scope));
         CARBON_RETURN_IF_ERROR(ExpectNonPlaceholderType(
             arg.expression().source_loc(), &arg.expression().static_type()));
@@ -2787,6 +2802,9 @@ auto TypeChecker::TypeCheckExp(Nonnull<Expression*> e,
       auto& struct_type = cast<StructTypeLiteral>(*e);
       std::vector<NamedValue> fields;
       for (auto& arg : struct_type.fields()) {
+        CARBON_RETURN_IF_ERROR(
+            ExpectFieldNotExist(arg.expression().source_loc(), "struct member",
+                                fields, arg.name()));
         CARBON_ASSIGN_OR_RETURN(
             Nonnull<const Value*> type,
             TypeCheckTypeExp(&arg.expression(), impl_scope));
