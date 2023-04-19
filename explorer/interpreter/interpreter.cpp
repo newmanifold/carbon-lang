@@ -7,6 +7,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <iterator>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -39,8 +40,6 @@ using llvm::dyn_cast;
 using llvm::isa;
 
 namespace Carbon {
-
-static std::mt19937 generator(12);
 
 // Constructs an ActionStack suitable for the specified phase.
 static auto MakeTodo(Phase phase, Nonnull<Heap*> heap) -> ActionStack {
@@ -979,7 +978,7 @@ auto Interpreter::CallFunction(const CallExpression& call,
     }
     case Value::Kind::FunctionValue:
     case Value::Kind::BoundMethodValue: {
-      const auto* func_val = dyn_cast<FunctionOrMethodValue>(fun);
+      const auto* func_val = cast<FunctionOrMethodValue>(fun);
 
       const FunctionDeclaration& function = func_val->declaration();
       if (!function.body().has_value()) {
@@ -1085,6 +1084,66 @@ auto Interpreter::CallFunction(const CallExpression& call,
       return ProgramError(call.source_loc())
              << "in call, expected a function, not " << *fun;
   }
+}
+
+// Returns true if the format string is okay to pass to formatv. This only
+// supports `{{` and `{N}` as special syntax.
+static auto ValidateFormatString(SourceLocation source_loc,
+                                 const char* format_string, int num_args)
+    -> ErrorOr<Success> {
+  const char* cursor = format_string;
+  while (true) {
+    switch (*cursor) {
+      case '\0':
+        // End of string.
+        return Success();
+      case '{':
+        // `{` is a special character.
+        ++cursor;
+        switch (*cursor) {
+          case '\0':
+            return ProgramError(source_loc)
+                   << "`{` must be followed by a second `{` or index in `"
+                   << format_string << "`";
+          case '{':
+            // Escaped `{`.
+            ++cursor;
+            break;
+          case '}':
+            return ProgramError(source_loc)
+                   << "Invalid `{}` in `" << format_string << "`";
+          default:
+            int index = 0;
+            while (*cursor != '}') {
+              if (*cursor == '\0') {
+                return ProgramError(source_loc)
+                       << "Index incomplete in `" << format_string << "`";
+              }
+              if (*cursor < '0' || *cursor > '9') {
+                return ProgramError(source_loc)
+                       << "Non-numeric character in index at offset "
+                       << cursor - format_string << " in `" << format_string
+                       << "`";
+              }
+              index = (10 * index) + (*cursor - '0');
+              if (index >= num_args) {
+                return ProgramError(source_loc)
+                       << "Index invalid with argument count of " << num_args
+                       << " at offset " << cursor - format_string << " in `"
+                       << format_string << "`";
+              }
+              ++cursor;
+            }
+            // Move past the `}`.
+            ++cursor;
+        }
+        break;
+      default:
+        // Arbitrary text.
+        ++cursor;
+    }
+  }
+  llvm_unreachable("Loop returns directly");
 }
 
 auto Interpreter::StepInstantiateType() -> ErrorOr<Success> {
@@ -1515,16 +1574,19 @@ auto Interpreter::StepExp() -> ErrorOr<Success> {
               Convert(args[0], arena_->New<StringType>(), exp.source_loc()));
           const char* format_string =
               cast<StringValue>(*format_string_value).value().c_str();
-          switch (args.size()) {
-            case 1:
+          int num_format_args = args.size() - 1;
+          CARBON_RETURN_IF_ERROR(ValidateFormatString(
+              intrinsic.source_loc(), format_string, num_format_args));
+          switch (num_format_args) {
+            case 0:
               llvm::outs() << llvm::formatv(format_string);
               break;
-            case 2:
+            case 1:
               llvm::outs() << llvm::formatv(format_string,
                                             cast<IntValue>(*args[1]).value());
               break;
             default:
-              CARBON_FATAL() << "Unexpected arg count: " << args.size();
+              CARBON_FATAL() << "Too many format args: " << num_format_args;
           }
           // Implicit newline; currently no way to disable it.
           llvm::outs() << "\n";
@@ -1593,12 +1655,24 @@ auto Interpreter::StepExp() -> ErrorOr<Success> {
         }
         case IntrinsicExpression::Intrinsic::Rand: {
           CARBON_CHECK(args.size() == 2);
-          const auto& low = cast<IntValue>(*args[0]).value();
-          const auto& high = cast<IntValue>(*args[1]).value();
-          CARBON_CHECK(high > low);
+          const int64_t low = cast<IntValue>(*args[0]).value();
+          const int64_t high = cast<IntValue>(*args[1]).value();
+          if (low >= high) {
+            return ProgramError(exp.source_loc())
+                   << "Rand inputs must be ordered for a non-empty range: "
+                   << low << " must be less than " << high;
+          }
+          // Use 64-bit to handle large ranges where `high - low` might exceed
+          // int32_t maximums.
+          static std::mt19937_64 generator(12);
+          const int64_t range = high - low;
           // We avoid using std::uniform_int_distribution because it's not
           // reproducible across builds/platforms.
-          int r = (generator() % (high - low)) + low;
+          int64_t r = (generator() % range) + low;
+          CARBON_CHECK(r >= std::numeric_limits<int32_t>::min() &&
+                       r <= std::numeric_limits<int32_t>::max())
+              << "Non-int32 result: " << r;
+          CARBON_CHECK(r >= low && r <= high) << "Out-of-range result: " << r;
           return todo_.FinishAction(arena_->New<IntValue>(r));
         }
         case IntrinsicExpression::Intrinsic::ImplicitAs: {

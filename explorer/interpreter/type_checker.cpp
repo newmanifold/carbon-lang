@@ -411,7 +411,7 @@ static auto IsConcreteType(Nonnull<const Value*> value) -> bool {
 // depends on any template paramaeter.
 static auto IsTemplateDependent(Nonnull<const Value*> value) -> bool {
   // A VariableType is template dependent if it names a template binding.
-  if (auto* var_type = dyn_cast<VariableType>(value)) {
+  if (const auto* var_type = dyn_cast<VariableType>(value)) {
     return var_type->binding().binding_kind() ==
            GenericBinding::BindingKind::Template;
   }
@@ -448,7 +448,7 @@ static auto IsTemplateSaturated(const Bindings& bindings) -> bool {
 // have template argument values specified.
 static auto IsTemplateSaturated(
     llvm::ArrayRef<Nonnull<const GenericBinding*>> bindings) -> bool {
-  for (auto* binding : bindings) {
+  for (const auto* binding : bindings) {
     if (binding->binding_kind() == GenericBinding::BindingKind::Template &&
         !binding->has_template_value()) {
       return false;
@@ -723,12 +723,9 @@ auto TypeChecker::BuildSubtypeConversion(Nonnull<Expression*> source,
                                          Nonnull<const PointerType*> src_ptr,
                                          Nonnull<const PointerType*> dest_ptr)
     -> ErrorOr<Nonnull<const Expression*>> {
-  const auto* src_class = dyn_cast<NominalClassType>(&src_ptr->pointee_type());
-  const auto* dest_class =
-      dyn_cast<NominalClassType>(&dest_ptr->pointee_type());
+  const auto* src_class = cast<NominalClassType>(&src_ptr->pointee_type());
+  const auto* dest_class = cast<NominalClassType>(&dest_ptr->pointee_type());
   const auto dest = dest_class->declaration().name();
-  CARBON_CHECK(src_class && dest_class)
-      << "Invalid source or destination pointee";
   Nonnull<Expression*> last_expr = source;
   const auto* cur_class = src_class;
   while (!TypeEqual(cur_class, dest_class, std::nullopt)) {
@@ -3687,7 +3684,7 @@ auto TypeChecker::TypeCheckExp(Nonnull<Expression*> e,
         case IntrinsicExpression::Intrinsic::Dealloc: {
           if (args.size() != 1) {
             return ProgramError(e->source_loc())
-                   << "__intrinsic_new takes 1 argument";
+                   << "__intrinsic_delete takes 1 argument";
           }
           const auto* arg_type = &args[0]->static_type();
           CARBON_RETURN_IF_ERROR(
@@ -5604,7 +5601,7 @@ auto TypeChecker::CheckAndAddImplBindings(
                                                  iface_witness, iface_scope));
 
       std::optional<TypeStructureSortKey> sort_key;
-      if (deduced_bindings.size()) {
+      if (!deduced_bindings.empty()) {
         sort_key = TypeStructureSortKey::ForImpl(impl_type, iface_type);
         if (trace_stream_->is_enabled()) {
           *trace_stream_ << "type structure sort key for `impl " << *impl_type
@@ -5643,7 +5640,7 @@ auto TypeChecker::DeclareImplDeclaration(Nonnull<ImplDeclaration*> impl_decl,
   if (!IsTemplateSaturated(impl_decl->deduced_parameters())) {
     CloneContext context(arena_);
     TemplateInfo template_info = {.pattern = context.Clone(impl_decl)};
-    for (auto deduced : impl_decl->deduced_parameters()) {
+    for (const auto* deduced : impl_decl->deduced_parameters()) {
       template_info.param_map.insert(
           {deduced, context.GetExistingClone(deduced)});
     }
@@ -5961,11 +5958,15 @@ auto TypeChecker::DeclareAliasDeclaration(Nonnull<AliasDeclaration*> alias,
            << "invalid target for alias declaration";
   }
 
-  CARBON_ASSIGN_OR_RETURN(Nonnull<const Value*> target,
-                          InterpExp(&alias->target(), arena_, trace_stream_));
-
   alias->set_static_type(&alias->target().static_type());
-  alias->set_constant_value(target);
+  // constant_value not needed for namespace alias because these are resolved by
+  // NameResolver
+  if (alias->target().static_type().kind() !=
+      Value::Kind::TypeOfNamespaceName) {
+    CARBON_ASSIGN_OR_RETURN(Nonnull<const Value*> target,
+                            InterpExp(&alias->target(), arena_, trace_stream_));
+    alias->set_constant_value(target);
+  }
   return Success();
 }
 
@@ -6058,9 +6059,7 @@ auto TypeChecker::TypeCheckDeclaration(
       if (var.has_initializer()) {
         CARBON_RETURN_IF_ERROR(TypeCheckExp(&var.initializer(), impl_scope));
       }
-      const auto* binding_type =
-          dyn_cast<ExpressionPattern>(&var.binding().type());
-      if (binding_type == nullptr) {
+      if (!isa<ExpressionPattern>(&var.binding().type())) {
         // TODO: consider adding support for `auto`
         return ProgramError(var.source_loc())
                << "Type of a top-level variable must be an expression.";
@@ -6171,7 +6170,7 @@ auto TypeChecker::DeclareDeclaration(Nonnull<Declaration*> d,
       auto& var = cast<VariableDeclaration>(*d);
       // Associate the variable name with it's declared type in the
       // compile-time symbol table.
-      if (!llvm::isa<ExpressionPattern>(var.binding().type())) {
+      if (!isa<ExpressionPattern>(var.binding().type())) {
         return ProgramError(var.binding().type().source_loc())
                << "Expected expression for variable type";
       }
@@ -6231,7 +6230,7 @@ auto TypeChecker::FindMixedMemberAndType(
     -> ErrorOr<std::optional<
         std::pair<Nonnull<const Value*>, Nonnull<const Declaration*>>>> {
   for (Nonnull<const Declaration*> member : members) {
-    if (llvm::isa<MixDeclaration>(member)) {
+    if (isa<MixDeclaration>(member)) {
       const auto& mix_decl = cast<MixDeclaration>(*member);
       Nonnull<const MixinPseudoType*> mixin = &mix_decl.mixin_value();
       CARBON_ASSIGN_OR_RETURN(

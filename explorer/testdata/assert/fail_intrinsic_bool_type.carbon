@@ -8,14 +8,15 @@
 
 package ExplorerTest api;
 
-namespace N;
-alias M = N;
-// TODO: It's unclear whether this should be permitted. If not, we should
-// produce a better diagnostic.
-// CHECK:STDERR: COMPILATION ERROR: {{.*}}/explorer/testdata/namespace/fail_namespace_alias_member.carbon:[[@LINE+1]]: alias M cannot be used as a name qualifier
-fn M.F() {}
+class ConvertTo(T:! type) {
+  var v: T;
+  impl as ImplicitAs(T) {
+    fn Convert[self: Self]() -> T { return self.v; }
+  }
+}
 
 fn Main() -> i32 {
-  N.F();
+  // CHECK:STDERR: SYNTAX ERROR: {{.*}}/explorer/testdata/assert/fail_intrinsic_bool_type.carbon:[[@LINE+1]]: syntax error, unexpected COMMA
+  __intrinsic_assert(, "unused");
   return 0;
 }
